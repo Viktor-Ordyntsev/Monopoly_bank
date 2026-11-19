@@ -1,4 +1,5 @@
 import queue
+import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -379,124 +380,62 @@ with st.sidebar:
     st.divider()
     st.caption("Сначала прошей Arduino и закрой Serial Monitor.")
 
-tabs = st.tabs([
-    "🎮 Партия",
-    "👥 Игроки",
-    "💸 Операции",
-    "📜 История",
-    "⚙️ Настройки",
-])
+tabs = st.tabs(["🎲 Партии и игроки", "🎮 Игра", "📜 История", "⚙️ Настройки"])
 
 with tabs[0]:
-    game = bank.get_game()
-    if not game:
-        st.subheader("Новая партия")
+    st.subheader("Партии")
+    games = bank.list_games()
+    active_id = bank.get_active_game_id()
+    if games:
+        labels = {f"{'▶ ' if g['id'] == active_id else ''}{g['name']} · {g['status']} · игроков: {g['player_count']}": g['id'] for g in games}
+        chosen_label = st.selectbox("Выбранная партия", list(labels), key="game_picker")
+        chosen_id = labels[chosen_label]
+        cols = st.columns(3)
+        if cols[0].button("Сделать активной", disabled=chosen_id == active_id, use_container_width=True):
+            bank.set_active_game(chosen_id); st.rerun()
+        if cols[1].button("Завершить партию", disabled=games[[g['id'] for g in games].index(chosen_id)]['status'] != 'active', use_container_width=True):
+            bank.finish_game(chosen_id); st.rerun()
+        with st.expander("Удалить партию", expanded=False):
+            st.warning("Удалятся игроки и история этой партии без возможности восстановления.")
+            if st.button("Удалить выбранную партию", key="delete_game"):
+                bank.delete_game(chosen_id); st.rerun()
+    with st.expander("Создать новую партию", expanded=not bool(games)):
         with st.form("new_game_form"):
-            game_name = st.text_input("Название партии", "Вечерняя Монополия")
-            start_balance = st.number_input("Стартовый капитал", min_value=0, value=15000, step=500)
-            salary = st.number_input("Выплата за «Вперёд»", min_value=0, value=2000, step=100)
-            submitted = st.form_submit_button("Создать партию", type="primary")
-            if submitted:
-                bank.create_game(game_name, int(start_balance), int(salary))
-                st.success("Партия создана. Теперь добавь игроков и привяжи карты.")
-                st.rerun()
-    else:
-        st.subheader(game["name"])
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Стартовый капитал", money(game["start_balance"]))
-        c2.metric("Зарплата за «Вперёд»", money(game["salary"]))
-        c3.metric("Игроков", len(bank.get_players()))
+            game_name = st.text_input("Название", "Вечерняя Монополия")
+            start_balance = st.number_input("Стартовый капитал", min_value=0, value=1500, step=100)
+            salary = st.number_input("Зарплата за «Вперёд»", min_value=0, value=200, step=50)
+            if st.form_submit_button("Создать и выбрать партию", type="primary"):
+                try: bank.create_game(game_name, int(start_balance), int(salary)); st.rerun()
+                except ValueError as exc: st.error(str(exc))
 
+    game = bank.get_game()
+    st.divider(); st.subheader("Игроки текущей партии")
+    if not game:
+        st.info("Выбери или создай партию, чтобы управлять игроками.")
+    else:
         players = bank.get_players()
         if players:
-            df = pd.DataFrame([
-                {
-                    "Игрок": p["name"],
-                    "Баланс": money(p["balance"]),
-                    "Карта": p["card_uid"] or "Не привязана",
-                    "Статус": p["status"],
-                }
-                for p in players
-            ])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("Добавь первого игрока на вкладке «Игроки».")
-
-        st.markdown("#### Быстрые игровые события")
-        players = bank.get_players()
-        if players:
-            player_options = {f'{p["name"]} · {money(p["balance"])}': p["id"] for p in players}
-            selected = st.selectbox("Игрок, прошедший «Вперёд»", list(player_options), key="salary_player")
-            if st.button("Начислить зарплату", type="primary"):
-                bank.transfer(
-                    None, player_options[selected], int(game["salary"]),
-                    "Прохождение «Вперёд»", "salary"
-                )
-                st.success("Зарплата начислена.")
-                st.rerun()
-
-        st.warning("Прототип не отслеживает положение фишек на поле. Игровые события вводятся игроками вручную.")
-
-with tabs[1]:
-    st.subheader("Игроки и RFID-карты")
-    players = bank.get_players()
-    if players:
-        st.dataframe(
-            pd.DataFrame([{
-                "Имя": p["name"],
-                "Баланс": money(p["balance"]),
-                "UID карты": p["card_uid"] or "—",
-                "Статус": p["status"],
-            } for p in players]),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    st.markdown("#### Добавить игрока")
-    with st.form("add_player_form"):
-        name = st.text_input("Имя игрока")
-        uid = st.text_input(
-            "UID RFID-карты (можно оставить пустым)",
-            value=st.session_state.get("last_card_uid", ""),
-        )
-        add = st.form_submit_button("Добавить игрока")
-        if add:
-            try:
-                bank.add_player(name, uid.strip().upper() or None)
-                st.success(f"Игрок {name} добавлен.")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
-    st.markdown("#### Привязать карту существующему игроку")
-    if players:
-        pmap = {p["name"]: p["id"] for p in players}
-        with st.form("bind_card_form"):
-            target_name = st.selectbox("Игрок", list(pmap))
-            card_uid = st.text_input(
-                "UID карты",
-                value=st.session_state.get("last_card_uid", ""),
-            )
-            bind = st.form_submit_button("Привязать карту")
-            if bind:
-                try:
-                    bank.bind_card(pmap[target_name], card_uid.strip().upper())
-                    st.success("Карта привязана.")
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
-
-    st.markdown("#### Последнее считывание")
-    last_uid = st.session_state.get("last_card_uid")
-    if last_uid:
-        st.code(last_uid)
-        linked = bank.get_player_by_card(last_uid)
-        if linked:
-            st.success(f"Карта принадлежит: {linked['name']}")
-        else:
-            st.warning("Карта ещё не привязана к игроку.")
-    else:
-        st.info("Приложи карту к считывателю, чтобы увидеть UID.")
+            st.dataframe(pd.DataFrame([{"ID":p['id'],"Имя":p['name'],"Баланс":money(p['balance']),"UID карты":p['card_uid'] or '—',"Статус":p['status']} for p in players]), use_container_width=True, hide_index=True)
+            pmap={f"{p['name']} · ID {p['id']}":p for p in players}
+            with st.expander("Изменить игрока"):
+                label=st.selectbox("Игрок",list(pmap),key="edit_player_pick"); p=pmap[label]
+                with st.form("edit_player_form"):
+                    new_name=st.text_input("Имя",p['name']); new_uid=st.text_input("UID карты",p['card_uid'] or "")
+                    status=st.selectbox("Статус",["В игре","Банкрот"],index=0 if p['status']=="В игре" else 1)
+                    if st.form_submit_button("Сохранить изменения"):
+                        try: bank.update_player(p['id'],new_name,new_uid,status); st.rerun()
+                        except (ValueError,sqlite3.IntegrityError) as exc: st.error(f"Не удалось сохранить: {exc}")
+                if st.button("Удалить игрока",key=f"del_player_{p['id']}"):
+                    bank.delete_player(p['id']); st.rerun()
+        with st.expander("Добавить игрока"):
+            with st.form("add_player_form"):
+                name=st.text_input("Имя игрока",key="new_player_name")
+                uid=st.text_input("UID RFID (необязательно)",value=st.session_state.get("last_card_uid", ""),key="new_player_uid")
+                if st.form_submit_button("Добавить игрока"):
+                    try: bank.add_player(name,uid or None); st.rerun()
+                    except (ValueError,sqlite3.IntegrityError) as exc: st.error(f"Не удалось добавить: {exc}")
+        if st.session_state.get("last_card_uid"):
+            st.caption(f"Последняя считанная карта: {st.session_state.last_card_uid}")
 
 
 
@@ -504,7 +443,7 @@ with tabs[1]:
 # ВКЛАДКА 3. БАНКОВСКИЕ ОПЕРАЦИИ
 # ==========================================
 
-with tabs[2]:
+with tabs[1]:
 
     st.subheader("🏦 Банковские операции")
 
@@ -529,7 +468,10 @@ with tabs[2]:
     # ЕСЛИ ИГРОК НЕ ВЫБРАН
     # --------------------------------------
 
-    if player is None:
+    if game is None:
+        st.warning("Сначала выбери или создай партию на вкладке «Партии и игроки».")
+
+    elif player is None:
 
         st.warning(
             "Приложите RFID-карту игрока, "
@@ -902,7 +844,7 @@ with tabs[2]:
                     st.rerun()
 
 
-with tabs[3]:
+with tabs[2]:
     st.subheader("История транзакций")
     transactions = bank.get_transactions()
     if transactions:
@@ -936,7 +878,7 @@ with tabs[3]:
     else:
         st.info("Операций пока нет.")
 
-with tabs[4]:
+with tabs[3]:
     st.subheader("Правила партии")
     game = bank.get_game()
     if not game:
