@@ -428,9 +428,18 @@ with tabs[0]:
                 if st.button("Удалить игрока",key=f"del_player_{p['id']}"):
                     bank.delete_player(p['id']); st.rerun()
         with st.expander("Добавить игрока"):
+            latest_uid = st.session_state.get("last_card_uid") or ""
+            if latest_uid:
+                st.info("Последняя считанная карта будет подставлена автоматически.")
+                st.code(latest_uid, language=None)
+            else:
+                st.caption("Приложи RFID-карту к считывателю — её код появится здесь автоматически. Можно также ввести UID вручную.")
             with st.form("add_player_form"):
                 name=st.text_input("Имя игрока",key="new_player_name")
-                uid=st.text_input("UID RFID (необязательно)",value=st.session_state.get("last_card_uid", ""),key="new_player_uid")
+                # A fresh key per scanned UID makes Streamlit refresh the field
+                # when a new card is presented, while preserving manual edits
+                # during ordinary reruns/autorefreshes.
+                uid=st.text_input("Код карты (UID)",value=latest_uid,key=f"new_player_uid_{latest_uid or 'manual'}")
                 if st.form_submit_button("Добавить игрока"):
                     try: bank.add_player(name,uid or None); st.rerun()
                     except (ValueError,sqlite3.IntegrityError) as exc: st.error(f"Не удалось добавить: {exc}")
